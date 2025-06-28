@@ -61,24 +61,21 @@ func (v *IPValidator) ExtractCIDRsFromBirdConfig(filePath string) ([]string, err
 	var cidrs []string
 	scanner := bufio.NewScanner(file)
 
-	// 匹配CIDR的正则表达式
-	cidrRegex := regexp.MustCompile(`\s*([0-9a-fA-F:.]+/\d+),?\s*`)
+	// 匹配Bird路由配置的正则表达式: route <cidr> via "<interface>";
+	routeRegex := regexp.MustCompile(`^\s*route\s+([0-9a-fA-F:.]+/\d+)\s+via\s+"[^"]+"\s*;\s*$`)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 
-		// 跳过注释和定义行
-		if strings.HasPrefix(line, "#") ||
-			strings.HasPrefix(line, "define") ||
-			line == "[" || line == "];" || line == "" {
+		// 跳过注释和空行
+		if strings.HasPrefix(line, "#") || line == "" {
 			continue
 		}
 
-		// 提取CIDR
-		matches := cidrRegex.FindStringSubmatch(line)
+		// 提取路由配置中的CIDR
+		matches := routeRegex.FindStringSubmatch(line)
 		if len(matches) > 1 {
-			cidr := strings.TrimSuffix(matches[1], ",")
-			cidrs = append(cidrs, cidr)
+			cidrs = append(cidrs, matches[1])
 		}
 	}
 

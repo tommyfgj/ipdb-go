@@ -22,17 +22,18 @@ func main() {
 		samples    = flag.Int("samples", 5, "验证时每个CIDR的采样数量")
 		ipv4Config = flag.String("ipv4", "", "验证模式下的IPv4配置文件路径")
 		ipv6Config = flag.String("ipv6", "", "验证模式下的IPv6配置文件路径")
+		iface      = flag.String("interface", "wg0", "Bird路由配置中的接口名称")
 	)
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "NCHNRoutes - 非中国大陆路由生成和验证工具\n\n")
 		fmt.Fprintf(os.Stderr, "使用方法:\n")
-		fmt.Fprintf(os.Stderr, "  生成模式: %s -mode=generate -db=<数据库路径> [-output=<输出目录>] [-parallel] [-workers=N]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  生成模式: %s -mode=generate -db=<数据库路径> [-output=<输出目录>] [-interface=<接口名>] [-parallel] [-workers=N]\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  验证模式: %s -mode=validate -db=<数据库路径> [-ipv4=<配置文件>] [-ipv6=<配置文件>] [-samples=N]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "参数说明:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\n示例:\n")
-		fmt.Fprintf(os.Stderr, "  生成配置: %s -mode=generate -db=./city.free.ipdb -output=./output/ -parallel\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  生成配置: %s -mode=generate -db=./city.free.ipdb -output=./output/ -interface=tun0 -parallel\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  验证配置: %s -mode=validate -db=./city.free.ipdb -ipv4=./output/bird_v4.conf -ipv6=./output/bird_v6.conf\n", os.Args[0])
 	}
 
@@ -50,7 +51,7 @@ func main() {
 
 	switch *mode {
 	case "generate":
-		generateConfigs(*dbPath, *outputDir, *parallel)
+		generateConfigs(*dbPath, *outputDir, *iface, *parallel)
 	case "validate":
 		validateConfigs(*dbPath, *ipv4Config, *ipv6Config, *samples)
 	default:
@@ -60,10 +61,11 @@ func main() {
 	}
 }
 
-func generateConfigs(dbPath, outputDir string, useParallel bool) {
+func generateConfigs(dbPath, outputDir, iface string, useParallel bool) {
 	fmt.Printf("=== 生成Bird配置模式 ===\n")
 	fmt.Printf("数据库: %s\n", dbPath)
 	fmt.Printf("输出目录: %s\n", outputDir)
+	fmt.Printf("接口名称: %s\n", iface)
 	if useParallel {
 		fmt.Printf("并行模式: 启用 (%d个CPU核心)\n", runtime.NumCPU())
 	} else {
@@ -203,7 +205,7 @@ func generateConfigs(dbPath, outputDir string, useParallel bool) {
 	// 并行生成IPv4配置
 	go func() {
 		defer wg.Done()
-		if err := nchnroutes.OutputIPv4BirdConfig(ipv4CIDRs, ipv4File); err != nil {
+		if err := nchnroutes.OutputIPv4BirdConfig(ipv4CIDRs, ipv4File, iface); err != nil {
 			mu.Lock()
 			outputErrors = append(outputErrors, fmt.Errorf("生成IPv4配置失败: %v", err))
 			mu.Unlock()
@@ -213,7 +215,7 @@ func generateConfigs(dbPath, outputDir string, useParallel bool) {
 	// 并行生成IPv6配置
 	go func() {
 		defer wg.Done()
-		if err := nchnroutes.OutputIPv6BirdConfig(ipv6CIDRs, ipv6File); err != nil {
+		if err := nchnroutes.OutputIPv6BirdConfig(ipv6CIDRs, ipv6File, iface); err != nil {
 			mu.Lock()
 			outputErrors = append(outputErrors, fmt.Errorf("生成IPv6配置失败: %v", err))
 			mu.Unlock()
