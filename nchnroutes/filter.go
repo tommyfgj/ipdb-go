@@ -1,7 +1,9 @@
 package nchnroutes
 
 import (
+	"fmt"
 	"net"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ type FilterStats struct {
 	MacaoKept       int
 	TaiwanKept      int
 	OtherKept       int
+	ChinaCIDRsSaved int // 保存的中国大陆CIDR数量
 }
 
 // IsMainlandChina 检查是否为中国大陆IP（排除港澳台）
@@ -155,15 +158,20 @@ func isTaiwan(info []string) bool {
 		(strings.Contains(regionName, "台湾") || strings.Contains(regionName, "Taiwan"))
 }
 
-// FilterRanges 过滤IP范围并收集统计信息
-func FilterRanges(ranges []IPRange) ([]IPRange, FilterStats) {
+// FilterRanges 过滤IP范围并收集统计信息，同时收集中国大陆IP段
+func FilterRanges(ranges []IPRange) ([]IPRange, []IPRange, FilterStats) {
 	var filtered []IPRange
+	var chinaRanges []IPRange // 收集中国大陆IP段
 	stats := FilterStats{TotalRanges: len(ranges)}
 
 	for _, r := range ranges {
 		// 检查中国大陆
 		if IsMainlandChina(r.Info) {
 			stats.ChinaFiltered++
+			// 排除私有/保留地址后再添加到中国大陆列表
+			if !IsPrivateOrReserved(r.StartIP, r.EndIP) {
+				chinaRanges = append(chinaRanges, r)
+			}
 			continue
 		}
 
@@ -187,13 +195,14 @@ func FilterRanges(ranges []IPRange) ([]IPRange, FilterStats) {
 		filtered = append(filtered, r)
 	}
 
-	return filtered, stats
+	stats.ChinaCIDRsSaved = len(chinaRanges)
+	return filtered, chinaRanges, stats
 }
 
 // FilterRangesParallel 并行过滤IP范围
-func FilterRangesParallel(ranges []IPRange) ([]IPRange, FilterStats) {
+func FilterRangesParallel(ranges []IPRange) ([]IPRange, []IPRange, FilterStats) {
 	if len(ranges) == 0 {
-		return ranges, FilterStats{TotalRanges: 0}
+		return ranges, []IPRange{}, FilterStats{TotalRanges: 0}
 	}
 
 	// 获取CPU核心数，设置并发数
@@ -210,8 +219,9 @@ func FilterRangesParallel(ranges []IPRange) ([]IPRange, FilterStats) {
 
 	// 创建channels和WaitGroup
 	type result struct {
-		filtered []IPRange
-		stats    FilterStats
+		filtered    []IPRange
+		chinaRanges []IPRange
+		stats       FilterStats
 	}
 
 	resultChan := make(chan result, numWorkers)
@@ -228,10 +238,10 @@ func FilterRangesParallel(ranges []IPRange) ([]IPRange, FilterStats) {
 		wg.Add(1)
 		go func(chunk []IPRange) {
 			defer wg.Done()
-			filtered, stats := FilterRanges(chunk)
+			filtered, chinaRanges, stats := FilterRanges(chunk)
 			// 重置TotalRanges，因为我们会在最后重新计算
 			stats.TotalRanges = len(chunk)
-			resultChan <- result{filtered: filtered, stats: stats}
+			resultChan <- result{filtered: filtered, chinaRanges: chinaRanges, stats: stats}
 		}(ranges[start:end])
 	}
 
@@ -243,18 +253,66 @@ func FilterRangesParallel(ranges []IPRange) ([]IPRange, FilterStats) {
 
 	// 收集结果
 	var allFiltered []IPRange
+	var allChinaRanges []IPRange
 	var totalStats FilterStats
 	totalStats.TotalRanges = len(ranges)
 
 	for res := range resultChan {
 		allFiltered = append(allFiltered, res.filtered...)
+		allChinaRanges = append(allChinaRanges, res.chinaRanges...)
 		totalStats.ChinaFiltered += res.stats.ChinaFiltered
 		totalStats.PrivateFiltered += res.stats.PrivateFiltered
 		totalStats.HongKongKept += res.stats.HongKongKept
 		totalStats.MacaoKept += res.stats.MacaoKept
 		totalStats.TaiwanKept += res.stats.TaiwanKept
 		totalStats.OtherKept += res.stats.OtherKept
+		totalStats.ChinaCIDRsSaved += res.stats.ChinaCIDRsSaved
 	}
 
-	return allFiltered, totalStats
+	return allFiltered, allChinaRanges, totalStats
+}
+
+// SaveChinaRoutes 保存中国大陆IP段到文件
+func SaveChinaRoutes(ipv4ChinaRanges, ipv6ChinaRanges []IPRange, outputDir string) error {
+	// 转换为CIDR并合并
+	ipv4CIDRs := RangesToCIDRs(ipv4ChinaRanges)
+	ipv6CIDRs := RangesToCIDRs(ipv6ChinaRanges)
+
+	mergedIPv4 := MergeCIDRs(ipv4CIDRs)
+	mergedIPv6 := MergeCIDRs(ipv6CIDRs)
+
+	// 保存IPv4中国路由
+	if len(mergedIPv4) > 0 {
+		ipv4File := fmt.Sprintf("%s/chnroute-ipv4.txt", outputDir)
+		if err := saveRouteFile(mergedIPv4, ipv4File, "IPv4"); err != nil {
+			return fmt.Errorf("保存IPv4中国路由失败: %v", err)
+		}
+		fmt.Printf("IPv4中国路由已保存到: %s (共%d个网段)\n", ipv4File, len(mergedIPv4))
+	}
+
+	// 保存IPv6中国路由
+	if len(mergedIPv6) > 0 {
+		ipv6File := fmt.Sprintf("%s/chnroute-ipv6.txt", outputDir)
+		if err := saveRouteFile(mergedIPv6, ipv6File, "IPv6"); err != nil {
+			return fmt.Errorf("保存IPv6中国路由失败: %v", err)
+		}
+		fmt.Printf("IPv6中国路由已保存到: %s (共%d个网段)\n", ipv6File, len(mergedIPv6))
+	}
+
+	return nil
+}
+
+// saveRouteFile 保存路由文件
+func saveRouteFile(cidrs []CIDR, filename, ipVersion string) error {
+	var content strings.Builder
+
+	content.WriteString(fmt.Sprintf("# 中国大陆%s网段列表\n", ipVersion))
+	content.WriteString("# 此文件包含所有中国大陆的IP段（已排除私有地址并合并相邻网段）\n")
+	content.WriteString(fmt.Sprintf("# 共%d个网段\n\n", len(cidrs)))
+
+	for _, cidr := range cidrs {
+		content.WriteString(cidr.Network.String() + "\n")
+	}
+
+	return os.WriteFile(filename, []byte(content.String()), 0644)
 }

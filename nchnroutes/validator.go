@@ -303,6 +303,164 @@ func (v *IPValidator) ValidateCIDRs(cidrs []string) {
 	}
 }
 
+// CheckCIDRs 检查所有CIDR并返回是否通过检查
+func (v *IPValidator) CheckCIDRs(cidrs []string) bool {
+	fmt.Printf("开始检查 %d 个CIDR，每个CIDR采样 %d 个IP地址...\n",
+		len(cidrs), v.validator.SamplesPerCIDR)
+
+	v.validator.TotalCIDRs = len(cidrs)
+
+	for i, cidr := range cidrs {
+		if i%1000 == 0 {
+			fmt.Printf("进度: %d/%d (%.1f%%)\n", i, len(cidrs), float64(i)*100/float64(len(cidrs)))
+		}
+
+		ips, err := v.GenerateSampleIPs(cidr, v.validator.SamplesPerCIDR)
+		if err != nil {
+			fmt.Printf("生成CIDR %s 的样本IP失败: %v\n", cidr, err)
+			continue
+		}
+
+		for _, ip := range ips {
+			v.validator.TotalIPsChecked++
+			_, err := v.ValidateIP(ip)
+			if err != nil {
+				// 错误已经在ValidateIP中处理
+			}
+		}
+	}
+
+	// 返回检查结果：没有发现中国大陆地址和私有地址则通过
+	return v.validator.ChinaMainlandFound == 0 && v.validator.PrivateAddressFound == 0
+}
+
+// CheckChinaRoutes 检查中国大陆路由文件中的CIDR
+func (v *IPValidator) CheckChinaRoutes(filePath string) (bool, error) {
+	cidrs, err := v.ExtractCIDRsFromTextFile(filePath)
+	if err != nil {
+		return false, err
+	}
+
+	fmt.Printf("从文件 %s 中提取到 %d 个CIDR\n", filePath, len(cidrs))
+
+	if len(cidrs) == 0 {
+		fmt.Println("  ❌ 文件中未找到有效的CIDR条目")
+		return false, nil
+	}
+
+	// 重置验证结果
+	v.validator = &ValidationResult{
+		SamplesPerCIDR:   v.validator.SamplesPerCIDR,
+		ChinaMainlandIPs: []string{},
+		PrivateIPs:       []string{},
+		InvalidIPs:       []string{},
+	}
+
+	// 检查中国大陆路由 - 期望这些IP都应该是中国大陆地址
+	for i, cidr := range cidrs {
+		if i%1000 == 0 {
+			fmt.Printf("进度: %d/%d (%.1f%%)\n", i, len(cidrs), float64(i)*100/float64(len(cidrs)))
+		}
+
+		ips, err := v.GenerateSampleIPs(cidr, v.validator.SamplesPerCIDR)
+		if err != nil {
+			fmt.Printf("生成CIDR %s 的样本IP失败: %v\n", cidr, err)
+			continue
+		}
+
+		for _, ip := range ips {
+			v.validator.TotalIPsChecked++
+			isValid, err := v.ValidateChinaIP(ip)
+			if err != nil {
+				fmt.Printf("验证IP %s 失败: %v\n", ip, err)
+			}
+			if !isValid {
+				fmt.Printf("⚠️  非中国大陆IP: %s (来自CIDR: %s)\n", ip, cidr)
+			}
+		}
+	}
+
+	v.validator.TotalCIDRs = len(cidrs)
+
+	// 对于中国大陆路由，成功应该意味着大部分IP都是中国地址
+	successRate := float64(v.validator.ChinaMainlandFound) / float64(v.validator.TotalIPsChecked)
+
+	fmt.Printf("中国大陆路由检查结果:\n")
+	fmt.Printf("  总CIDR数: %d\n", v.validator.TotalCIDRs)
+	fmt.Printf("  检查IP数: %d\n", v.validator.TotalIPsChecked)
+	fmt.Printf("  中国大陆IP: %d (%.2f%%)\n", v.validator.ChinaMainlandFound, successRate*100)
+	fmt.Printf("  非中国IP: %d\n", v.validator.TotalIPsChecked-v.validator.ChinaMainlandFound)
+
+	// 如果80%以上是中国大陆IP，认为检查通过
+	return successRate >= 0.8, nil
+}
+
+// ValidateChinaIP 验证IP是否为中国大陆地址
+func (v *IPValidator) ValidateChinaIP(ip string) (bool, error) {
+	// 检查是否为私有地址
+	if v.isPrivateOrReservedIP(ip) {
+		v.validator.PrivateAddressFound++
+		v.validator.PrivateIPs = append(v.validator.PrivateIPs, ip)
+		return false, nil
+	}
+
+	// 使用IPDB查询地理位置信息
+	info, err := v.cityDB.FindInfo(ip, "CN")
+	if err != nil {
+		v.validator.InvalidAddressFound++
+		v.validator.InvalidIPs = append(v.validator.InvalidIPs, ip)
+		return false, fmt.Errorf("查询IP %s 失败: %v", ip, err)
+	}
+
+	// 检查是否为中国大陆地址
+	if v.isChinaMainland(info) {
+		v.validator.ChinaMainlandFound++
+		v.validator.ChinaMainlandIPs = append(v.validator.ChinaMainlandIPs,
+			fmt.Sprintf("%s -> %s, %s, %s", ip, info.CountryName, info.RegionName, info.CityName))
+		return true, nil
+	}
+
+	// 对于中国大陆路由检查，非中国地址算作有效但需要记录
+	v.validator.ValidNonChinaFound++
+	return false, nil
+}
+
+// ExtractCIDRsFromTextFile 从文本文件中提取CIDR列表
+func (v *IPValidator) ExtractCIDRsFromTextFile(filePath string) ([]string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var cidrs []string
+	scanner := bufio.NewScanner(file)
+
+	// 匹配CIDR的正则表达式
+	cidrRegex := regexp.MustCompile(`^([0-9a-fA-F:.]+/\d+)`)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// 跳过注释和空行
+		if strings.HasPrefix(line, "#") || line == "" {
+			continue
+		}
+
+		// 提取CIDR
+		matches := cidrRegex.FindStringSubmatch(line)
+		if len(matches) > 1 {
+			cidrs = append(cidrs, matches[1])
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return cidrs, nil
+}
+
 // GenerateReport 生成验证报告
 func (v *IPValidator) GenerateReport() {
 	fmt.Println("\n" + strings.Repeat("=", 80))
