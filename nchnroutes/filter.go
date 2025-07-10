@@ -21,6 +21,70 @@ type FilterStats struct {
 	ChinaCIDRsSaved int // 保存的中国大陆CIDR数量
 }
 
+// isChineseService 检查是否为中国大陆相关服务商
+func isChineseService(countryName string) bool {
+	countryName = strings.ToLower(countryName)
+
+	// 中国大陆服务商关键词
+	chineseKeywords := []string{
+		"dnspod.com",    // 腾讯DNS
+		"tencent.com",   // 腾讯
+		"114dns.com",    // 114DNS
+		"alidns.com",    // 阿里DNS
+		"aliyun.com",    // 阿里云
+		"yamu.com",      // YAMU
+		"ipip.net",      // IPIP
+		"chinatelecom",  // 中国电信
+		"cnnic.cn",      // 中国互联网信息中心
+		"dns.cn",        // 中国DNS
+		"zdns.cn",       // 互联网域名系统
+		"sdns.cn",       // 安全DNS
+		"teleinfo.cn",   // 电信信息
+		"360.cn",        // 奇虎360
+		"baidu.com",     // 百度
+		"qq.com",        // 腾讯QQ
+		"weixin.qq.com", // 微信
+		"jd.com",        // 京东
+		"taobao.com",    // 淘宝
+		"tmall.com",     // 天猫
+		"sina.com",      // 新浪
+		"sohu.com",      // 搜狐
+		"netease.com",   // 网易
+		"iqiyi.com",     // 爱奇艺
+		"youku.com",     // 优酷
+		"bilibili.com",  // 哔哩哔哩
+		"huawei.com",    // 华为
+		"xiaomi.com",    // 小米
+		"oppo.com",      // OPPO
+		"vivo.com",      // VIVO
+		"meizu.com",     // 魅族
+		"lenovo.com",    // 联想
+	}
+
+	// 检查关键词
+	for _, keyword := range chineseKeywords {
+		if strings.Contains(countryName, keyword) {
+			return true
+		}
+	}
+
+	// 检查是否包含中文字符或中国相关词汇
+	if strings.Contains(countryName, "中国") ||
+		strings.Contains(countryName, "中华") ||
+		strings.Contains(countryName, "华为") ||
+		strings.Contains(countryName, "腾讯") ||
+		strings.Contains(countryName, "阿里") ||
+		strings.Contains(countryName, "百度") ||
+		strings.Contains(countryName, "京东") ||
+		strings.Contains(countryName, "新浪") ||
+		strings.Contains(countryName, "搜狐") ||
+		strings.Contains(countryName, "网易") {
+		return true
+	}
+
+	return false
+}
+
 // IsMainlandChina 检查是否为中国大陆IP（排除港澳台）
 func IsMainlandChina(info []string) bool {
 	if len(info) == 0 {
@@ -41,6 +105,11 @@ func IsMainlandChina(info []string) bool {
 			strings.Contains(regionName, "台湾") || strings.Contains(regionName, "Taiwan") {
 			return false
 		}
+		return true
+	}
+
+	// 检查是否为中国大陆服务商（country_code为空但country_name是中国服务商）
+	if isChineseService(countryName) {
 		return true
 	}
 
